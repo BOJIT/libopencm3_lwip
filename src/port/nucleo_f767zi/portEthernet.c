@@ -15,12 +15,7 @@
 #include <lwip/netifapi.h>
 #include <lwip/dhcp.h>
 #include <lwip/autoip.h>
-#include <lwip/stats.h>
-#include <lwip/err.h>
 #include <lwip/tcpip.h>
-
-#include <netif/etharp.h>
-#include <netif/ethernet.h>
 
 /* Libopencm3 Includes */
 #include <libopencm3/cm3/nvic.h>
@@ -39,23 +34,17 @@
 #include "task.h"
 #include "semphr.h"
 #include "timers.h"
-/// @todo if performance allows, only use RTOS functions that
-/// are exposed through the lwIP sys.h header file.
 
 /* Phy Register Includes */
-#ifdef PHY_LAN8742A
+#ifdef LWIP_PHY_LAN8742A
     #include <libopencm3/ethernet/phy_lan87xx.h>
-#endif /* PHY_LAN8742A */
-#ifdef PHY_KS8081
+#endif /* LWIP_PHY_LAN8742A */
+#ifdef LWIP_PHY_KS8081
     #include <libopencm3/ethernet/phy_ksz80x1.h>
-#endif /* PHY_KS8081 */
+#endif /* LWIP_PHY_KS8081 */
 
 #if LWIP_PTP
-    #define PTP_UPDATE_COARSE   0
-    #define PTP_UPDATE_FINE     1
-
-    #define PTP_PPS             1
-
+    /* Include lwip-ptp library */
     #include <lwip-ptp.h>
 
 
@@ -81,16 +70,37 @@
     #define ETH_PTPPPSCR_PPSFREQ_32768HZ        (0x0F<<0)
 
     /// @todo Timer omissions in libopencm3 not PR'ed yet.
-    #define TIM2_OR     MMIO32(TIM2_BASE + 0x50)
-    #define TIM2_OR_TI4_RMP                     (0x03<<10)
-    #define TIM2_OR_TI4_RMP_ETH_PTP             (0x01<<10)
+    #define TIM2_OR              MMIO32(TIM2_BASE + 0x50)
+    #define TIM2_OR_TI4_RMP                    (0x03<<10)
+    #define TIM2_OR_TI4_RMP_ETH_PTP            (0x01<<10)
 
 #endif /* LWIP_PTP */
+
+/* Pin Definitions */
+#define GPIO_ETH_RMII_MDIO      GPIO2    /* PA2 */
+#define GPIO_ETH_RMII_MDC       GPIO1    /* PC1 */
+#define GPIO_ETH_RMII_PPS_OUT   GPIO5    /* PB5 */
+#define GPIO_ETH_RMII_TX_EN     GPIO11   /* PG11 */
+#define GPIO_ETH_RMII_TXD0      GPIO13   /* PG13 */
+#define GPIO_ETH_RMII_TXD1      GPIO13   /* PB13 */
+#define GPIO_ETH_RMII_REF_CLK   GPIO1    /* PA1 */
+#define GPIO_ETH_RMII_CRS_DV    GPIO7    /* PA7 */
+#define GPIO_ETH_RMII_RXD0      GPIO4    /* PC4 */
+#define GPIO_ETH_RMII_RXD1      GPIO5    /* PC5 */
+
+
+/*-------------------- Static Global Variables (DMA) -------------------------*/
 
 /**
  * @brief Network interface struct for ethernet port
  */
 static struct netif ethernetif;
+
+/**
+ * @brief Task handle for triggering packet reception with a FreeRTOS
+ * direct task notification
+ */
+static TaskHandle_t eth_task = NULL;
 
 /**
  * @brief Generic union for conveniently extracting bytes from words
@@ -100,14 +110,12 @@ union word_byte {
     u8_t byte[4];
 };
 
-/*-------------------- Static Global Variables (DMA) -------------------------------*/
-
 /**
  * @brief Generic DMA Descriptor (see STM32Fxx7 Reference Manual)
  */
 struct dma_desc {
     volatile uint32_t   Status;
-    uint32_t   ControlBufferSize; // in actuality only first 12 bytes are size
+    uint32_t   ControlBufferSize;
     void *     Buffer1Addr;
     void *     Buffer2NextDescAddr;
     uint32_t   ExtendedStatus;
@@ -115,26 +123,26 @@ struct dma_desc {
     uint32_t   TimeStampLow;
     uint32_t   TimeStampHigh;
     struct pbuf *pbuf;
-}; //__attribute__((packed));
+};
 
 /**
  * @brief Transmit descriptor ring - adjust length from <b>port_config</b>
  * to tailor for your application
  */
-#ifndef STIF_NUM_TX_DMA_DESC
-    #define STIF_NUM_TX_DMA_DESC 10
+#ifndef LWIP_TX_DESC_LEN
+    #define LWIP_TX_DESC_LEN 10
 #endif /* STIF_NUM_TX_DMA_DESC */
-static struct dma_desc tx_dma_desc[STIF_NUM_TX_DMA_DESC];
+static struct dma_desc tx_dma_desc[LWIP_TX_DESC_LEN];
 static struct dma_desc *tx_cur_dma_desc;
 
 /**
  * @brief Recieve descriptor ring - adjust length from <b>port_config</b>
  * to tailor for your application
  */
-#ifndef STIF_NUM_RX_DMA_DESC
-    #define STIF_NUM_RX_DMA_DESC 10
+#ifndef LWIP_RX_DESC_LEN
+    #define LWIP_RX_DESC_LEN 10
 #endif /* STIF_NUM_RX_DMA_DESC */
-static struct dma_desc rx_dma_desc[STIF_NUM_RX_DMA_DESC];
+static struct dma_desc rx_dma_desc[LWIP_RX_DESC_LEN];
 static struct dma_desc *rx_cur_dma_desc;
 
 #if LWIP_PTP
@@ -150,14 +158,8 @@ static struct dma_desc *rx_cur_dma_desc;
     static TimerHandle_t ptp_timer[LWIP_PTP_NUM_TIMERS];
 #endif /* LWIP_PTP */
 
-/**
- * @brief Task handle for triggering packet reception with a FreeRTOS
- * direct task notification
- */
-static TaskHandle_t eth_task = NULL;
 
-
-/*------------------------------ PTP FUNCTIONS -------------------------------*/
+/*--------------------------- PTP Timer Functions ----------------------------*/
 
 #if LWIP_PTP
 
@@ -208,7 +210,12 @@ bool ptp_check_timer(u32_t idx)
     }
 }
 
-/*------------------------------- Clock Maths --------------------------------*/
+#endif /* LWIP_PTP */
+
+
+/*----------------------------- PTP Clock Maths ------------------------------*/
+
+#if LWIP_PTP
 
 /**
  * @brief Value by which the subsecond register is incremented.
@@ -275,9 +282,14 @@ bool ptp_check_timer(u32_t idx)
  */
 #define PTP_ADJ_MULTIPLIER      3
 
+#endif /* LWIP_PTP */
+
+
 /*-------------------------- PTP Hardware Functions --------------------------*/
 
-static err_t ptp_hw_init(s8_t mode)
+#if LWIP_PTP
+
+static err_t ptp_hw_init(void)
 {
     /* Disable timestamp interrupt */
     ETH_MACIMR |= ETH_MACIMR_TSTIM;
@@ -286,11 +298,7 @@ static err_t ptp_hw_init(s8_t mode)
     ETH_PTPTSCR |= ETH_PTPTSCR_TSE | ETH_PTPTSCR_TSSIPV4FE |
                         ETH_PTPTSCR_TSSIPV6FE | ETH_PTPTSCR_TSSARFE;
 
-    /* Use digital rollover (makes maths easier!) */
-    // ETH_PTPTSCR |= ETH_PTPTSCR_TSSSR;
-    /// @todo restrict to IPV4/IPV6 later (OR JUST PTP?)
-
-    #if PTP_PPS
+    #if LWIP_PTP_PPS
         /* Configure PPS output */
         ETH_PTPPPSCR = ETH_PTPPPSCR_PPSFREQ_32768HZ;
         TIM2_OR = TIM2_OR_TI4_RMP_ETH_PTP; // Enable PPS output.
@@ -299,29 +307,22 @@ static err_t ptp_hw_init(s8_t mode)
     /* Set smallest clock adjustment increment (20ns) */
     ETH_PTPSSIR = ETH_PTPSSIR_STSSI & ADJ_FREQ_BASE_INCREMENT;
 
-    if(mode == PTP_UPDATE_FINE) {
-        /* Set addend based on SYSCLK frequency (see reference manual) */
-        ETH_PTPTSAR = ADJ_FREQ_BASE_ADDEND;
+    /* Set addend based on SYSCLK frequency (see reference manual) */
+    ETH_PTPTSAR = ADJ_FREQ_BASE_ADDEND;
 
-        /* Update addend, wait for bit to be cleared */
-        while(ETH_PTPTSCR & ETH_PTPTSCR_TTSARU);
-        ETH_PTPTSCR |= ETH_PTPTSCR_TTSARU;
-        while(ETH_PTPTSCR & ETH_PTPTSCR_TTSARU);
+    /* Update addend, wait for bit to be cleared */
+    while(ETH_PTPTSCR & ETH_PTPTSCR_TTSARU);
 
-        /* Configure for fine update */
-        ETH_PTPTSCR |= ETH_PTPTSCR_TSFCU;
-    }
-    else {
-        /* Configure for coarse update */
-        ETH_PTPTSCR &= ~ETH_PTPTSCR_TSFCU;
-        /// @todo addend may also need to be set in coarse update mode.
-    }
+    ETH_PTPTSCR |= ETH_PTPTSCR_TTSARU;
+    while(ETH_PTPTSCR & ETH_PTPTSCR_TTSARU);
 
-    /// @todo does timestamp need to be set here?
+    /* Configure for fine update */
+    ETH_PTPTSCR |= ETH_PTPTSCR_TSFCU;
+
+    /* Initialise system time to Epoch (0) */
     ETH_PTPTSHUR = 0;
     ETH_PTPTSLUR = 0;
 
-    /* Initialise timestamping and wait for bit to be cleared */
     ETH_PTPTSCR |= ETH_PTPTSCR_TSSTI;
     while(ETH_PTPTSCR & ETH_PTPTSCR_TSSTI);
 
@@ -346,37 +347,6 @@ void ptp_set_time(const timestamp_t *timestamp)
     while(ETH_PTPTSCR & ETH_PTPTSCR_TSSTI);
 }
 
-void ptp_update_coarse(const timestamp_t *timestamp, s8_t sign)
-{
-    /* Backup addend (coarse update clears it) */
-    u32_t addend = ETH_PTPTSAR;
-
-    /* Wait for timestamp flags to be cleared */
-    while(ETH_PTPTSCR & (ETH_PTPTSCR_TSSTI | ETH_PTPTSCR_TSSTU
-                                            | ETH_PTPTSCR_TTSARU));
-
-    if(sign) {
-        ETH_PTPTSLUR = ETH_PTPTSLUR_TSUPNS; // Set timestamp as negative
-    }
-    else {
-        ETH_PTPTSLUR = 0;   // Set timestamp as positive (default)
-    }
-
-    /* Write timestamps to registers */
-    ETH_PTPTSHUR = timestamp->secondsField.lsb;
-    ETH_PTPTSLUR = PTP_TO_SUBSEC(timestamp->nanosecondsField) & ETH_PTPTSLUR_TSUSS;
-
-    /* Update timestamps */
-    while(ETH_PTPTSCR & ETH_PTPTSCR_TTSARU);
-    ETH_PTPTSCR |= ETH_PTPTSCR_TSSTU;
-    while(ETH_PTPTSCR & ETH_PTPTSCR_TSSTU);
-
-    /* Restore addend */
-    ETH_PTPTSAR = addend;
-    ETH_PTPTSCR |= ETH_PTPTSCR_TTSARU;
-}
-
-/// @todo verify that this maths is fine! Make sure clock adjustment is in PPB.
 void ptp_update_fine(s32_t adj)
 {
     /* Ensures that floating point maths is only performed once if compiler
@@ -397,6 +367,7 @@ void ptp_update_fine(s32_t adj)
 
 #endif /* LWIP_PTP */
 
+
 /*------------------------------ DMA Functions -------------------------------*/
 
 /**
@@ -404,13 +375,13 @@ void ptp_update_fine(s32_t adj)
 */
 static void init_tx_dma_desc(void)
 {
-    for (int i = 0; i < STIF_NUM_TX_DMA_DESC; i++) {
+    for (int i = 0; i < LWIP_TX_DESC_LEN; i++) {
         tx_dma_desc[i].Status = ETH_TDES0_TCH | ETH_TDES0_CIC_IPPLPH;
         tx_dma_desc[i].pbuf = NULL;
         tx_dma_desc[i].Buffer2NextDescAddr = &tx_dma_desc[i+1];
     }
     // Chain buffers in a ring
-    tx_dma_desc[STIF_NUM_TX_DMA_DESC-1].Buffer2NextDescAddr = &tx_dma_desc[0];
+    tx_dma_desc[LWIP_TX_DESC_LEN - 1].Buffer2NextDescAddr = &tx_dma_desc[0];
 
     ETH_DMATDLAR = (uint32_t) tx_dma_desc; // pointer to start of desc. list
     tx_cur_dma_desc = &tx_dma_desc[0];
@@ -421,7 +392,7 @@ static void init_tx_dma_desc(void)
 */
 static void init_rx_dma_desc(void)
 {
-    for (int i = 0; i < STIF_NUM_RX_DMA_DESC; i++) {
+    for (int i = 0; i < LWIP_RX_DESC_LEN; i++) {
         rx_dma_desc[i].Status = ETH_RDES0_OWN;
         rx_dma_desc[i].ControlBufferSize = ETH_RDES1_RCH | PBUF_POOL_BUFSIZE;
         rx_dma_desc[i].pbuf = pbuf_alloc(PBUF_RAW, PBUF_POOL_BUFSIZE, PBUF_POOL);
@@ -429,7 +400,8 @@ static void init_rx_dma_desc(void)
         rx_dma_desc[i].Buffer2NextDescAddr = &rx_dma_desc[i+1];
     }
     // Chain buffers in a ring
-    rx_dma_desc[STIF_NUM_RX_DMA_DESC-1].Buffer2NextDescAddr = &rx_dma_desc[0];
+    rx_dma_desc[LWIP_RX_DESC_LEN - 1].Buffer2NextDescAddr = &rx_dma_desc[0];
+
     ETH_DMARDLAR = (uint32_t) rx_dma_desc; // pointer to start of desc. list
     rx_cur_dma_desc = &rx_dma_desc[0];
 }
@@ -487,6 +459,7 @@ static void process_tx_descr(struct pbuf *p, int first, int last)
  * descriptor
  * @param netif network interface struct
 */
+/// @todo add return type!
 static int process_rx_descr(struct netif *netif)
 {
     /* Descriptor 'sanity checks' */
@@ -540,7 +513,7 @@ static int process_rx_descr(struct netif *netif)
     return 0;
 }
 
-/*------------------------------- Phy Functions ------------------------------*/
+/*------------------------------- PHY Functions ------------------------------*/
 
 /**
  * @brief gets phy autonegotiation status on link change - configures the MAC
@@ -551,11 +524,11 @@ static err_t phy_negotiate(void)
     int regval = ETH_MACCR;
     regval &= ~(ETH_MACCR_DM | ETH_MACCR_FES); // Clear mode and duplex bits
 
-    eth_smi_write(PHY_ADDRESS, PHY_REG_BCR, PHY_REG_BCR_AN); // Autonegotiate
+    eth_smi_write(LWIP_PHY_ADDRESS, PHY_REG_BCR, PHY_REG_BCR_AN); // Autonegotiate
 
-    #ifdef PHY_LAN8742A
+    #ifdef LWIP_PHY_LAN8742A
         int status;
-        while(!((status=eth_smi_read(PHY_ADDRESS, LAN87XX_SCSR))
+        while(!((status=eth_smi_read(LWIP_PHY_ADDRESS, LAN87XX_SCSR))
                 & LAN87XX_SCSR_AUTODONE));  // Wait for autonegotiation to finish
         switch(status & LAN87XX_SCSR_SPEED) {
             case LAN87XX_SCSR_SPEED_10HD:
@@ -571,10 +544,10 @@ static err_t phy_negotiate(void)
                 regval |= ETH_MACCR_DM;
                 break;
         }
-    #endif /* PHY_LAN8742A */
-    #ifdef PHY_KS8081
+    #endif /* LWIP_PHY_LAN8742A */
+    #ifdef LWIP_PHY_KS8081
         #error "This PHY is not implemented yet!"
-    #endif /* PHY_KS8081 */
+    #endif /* LWIP_PHY_KS8081 */
 
     LWIP_DEBUGF(NETIF_DEBUG, ("mac_init: autonegotiate status: %d\n", regval));
 
@@ -621,15 +594,16 @@ static void ethernetif_input(void* argument)
  * The phy hardware interrupt is not available if the phy is providing the
  * reference clock, so a simple poll is used.
 */
+/// @todo can this extra task be avoided?
 static void ethernetif_phy(void* argument)
 {
     struct netif *netif = (struct netif *) argument;
     bool link_status = netif_is_link_up(netif);
 
-    phy_reset(PHY_ADDRESS);
+    phy_reset(LWIP_PHY_ADDRESS);
 
     for(;;) {
-        if(link_status != phy_link_isup(PHY_ADDRESS)) {
+        if(link_status != phy_link_isup(LWIP_PHY_ADDRESS)) {
             link_status = !link_status;
             if(link_status == true) {
                 netifapi_netif_set_link_up(netif);      // Link up
@@ -648,6 +622,7 @@ static err_t ethernetif_output(struct netif *netif, struct pbuf *p)
 {
     (void)(netif); // Unused variable
 
+    // LWIP_DEBUGF(NETIF_DEBUG, ("ethernetif_output: sent!\n"));
     /// @todo create transmit IRQ handler?
     struct pbuf *q;
 
@@ -736,6 +711,7 @@ static err_t net_init(struct netif *netif)
 
         union word_byte id_addr;
         id_addr.word = signature[2];    // Use LSB of the Unique ID
+        /// @todo this needs to be checked for validity
 
         netif->hwaddr[0] = 0x00;       // ST's MAC Prefix
         netif->hwaddr[1] = 0x80;
@@ -781,7 +757,7 @@ static err_t ethernetif_init(struct netif *netif)
 
     #if LWIP_PTP
         /* Enable PTP Timestamping */
-        if ((ret = ptp_hw_init(PTP_UPDATE_FINE)) != ERR_OK)
+        if ((ret = ptp_hw_init()) != ERR_OK)
             return ret;
 
         /* Initialise ptpd-lwip */
@@ -834,19 +810,19 @@ static void eth_hw_init(void)
 
     /* GPIOB */
     gpio_set_output_options(GPIOB, GPIO_OTYPE_PP, GPIO_OSPEED_50MHZ,
-                                                #if PTP_PPS
+                                                #if LWIP_PTP_PPS
                                                     GPIO_ETH_RMII_PPS_OUT |
-                                                #endif /* PTP_PPS */
+                                                #endif /* LWIP_PTP_PPS */
                                                 GPIO_ETH_RMII_TXD1);
     gpio_set_af(GPIOB, GPIO_AF11,
-                                                #if PTP_PPS
+                                                #if LWIP_PTP_PPS
                                                     GPIO_ETH_RMII_PPS_OUT |
-                                                #endif /* PTP_PPS */
+                                                #endif /* LWIP_PTP_PPS */
                                                 GPIO_ETH_RMII_TXD1);
     gpio_mode_setup(GPIOB, GPIO_MODE_AF, GPIO_PUPD_NONE,
-                                                #if PTP_PPS
+                                                #if LWIP_PTP_PPS
                                                     GPIO_ETH_RMII_PPS_OUT |
-                                                #endif /* PTP_PPS */
+                                                #endif /* LWIP_PTP_PPS */
                                                 GPIO_ETH_RMII_TXD1);
 
     /* GPIOC */
@@ -874,11 +850,6 @@ static void eth_hw_init(void)
     /* NVIC Interrupt Configuration */
     nvic_set_priority(NVIC_ETH_IRQ, 5);
     nvic_enable_irq(NVIC_ETH_IRQ);
-
-    #if LWIP_PTP
-        /* PTP-Specific Hardware Initialisation */
-        ptp_hw_init(PTP_UPDATE_FINE);
-    #endif /* LWIP_PTP */
 }
 
 /*---------------------------- CALLBACK FUNCTIONS ----------------------------*/

@@ -47,6 +47,9 @@
     #define LWIP_GW_3   1
 #endif /* !LWIP_DHCP */
 
+/* Include PTP code into lwIP driver */
+// #define LWIP_PTP                    1
+
 #define LWIP_HOSTNAME       "lwip"  ///< Hostname of lwIP netif
 
 /** Enable lwIP core locking to allow non thread-safe functions to be called */

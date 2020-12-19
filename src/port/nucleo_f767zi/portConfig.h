@@ -2,7 +2,7 @@
  * @file
  * @brief Port-specific application configuration (put things here that may
  * be required by non-driver code).
- * 
+ *
  * @author @htmlonly &copy; @endhtmlonly 2020 James Bennion-Pedley
  *
  * @date 7 June 2020
@@ -49,21 +49,11 @@
 /*----------------------------------------------------------------------------*/
 
 /* Ethernet configuration */
-#define PHY_ADDRESS         PHY0        ///< PHY Address for SMI bus
-#define PHY_LAN8742A    ///< PHY chipset
+#define LWIP_PHY_ADDRESS         PHY0        ///< PHY Address for SMI bus
+#define LWIP_PHY_LAN8742A    ///< PHY chipset
 
-/* Pinout */
-#define GPIO_ETH_RMII_MDIO      GPIO2    /* PA2 THESE MIGHT MOVE*/
-#define GPIO_ETH_RMII_MDC       GPIO1    /* PC1 */
-#define GPIO_ETH_RMII_PPS_OUT   GPIO5    /* PB5 */
-#define GPIO_ETH_RMII_TX_EN     GPIO11   /* PG11 */
-#define GPIO_ETH_RMII_TXD0      GPIO13   /* PG13 */
-#define GPIO_ETH_RMII_TXD1      GPIO13   /* PB13 */
-#define GPIO_ETH_RMII_REF_CLK   GPIO1    /* PA1 */
-#define GPIO_ETH_RMII_CRS_DV    GPIO7    /* PA7 */
-#define GPIO_ETH_RMII_RXD0      GPIO4    /* PC4 */
-#define GPIO_ETH_RMII_RXD1      GPIO5    /* PC5 */
-
+/* Configure PPS pin to show on output */
+#define LWIP_PTP_PPS                1
 
 /*----------------------------------------------------------------------------*/
 

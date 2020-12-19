@@ -9,8 +9,10 @@ To test the driver functions, run the python script that lives in the `/test` fo
 
 Note that these drivers use the PlatformIO-lwIP library, which is in turn based on the PlatformIO-FreeRTOS library.
 These libraries are unmodified wrappers around the source libraries: version numbers as follows:
+
 - lwIP : **STABLE-2.1.X**
 - FreeRTOS : **v10.4.0**
+
 Porting the driver to other versions of lwIP and other RTOSes is relatively straightforward,
 but some native FreeRTOS functions are used in the driver for performance reasons.
 

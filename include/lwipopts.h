@@ -103,15 +103,25 @@
 #define LWIP_IGMP                       1
 
 
-/*-------------------------- LWIP_PTP Configuration --------------------------*/
+#define LWIP_DEBUG
+    // #define MEMP_DEBUG      LWIP_DBG_ON
+    // #define PBUF_DEBUG      LWIP_DBG_ON
+    #define IGMP_DEBUG      LWIP_DBG_ON
+    // #define TCPIP_DEBUG     LWIP_DBG_ON
+    // #define IP_DEBUG        LWIP_DBG_ON
+    #define DHCP_DEBUG      LWIP_DBG_ON
+    #define NETIF_DEBUG     LWIP_DBG_ON
+    // #define API_LIB_DEBUG   LWIP_DBG_ON
+    // #define API_MSG_DEBUG   LWIP_DBG_ON
+    // #define RAW_DEBUG       LWIP_DBG_ON
+    // #define SYS_DEBUG       LWIP_DBG_ON
 
-#define LWIP_PTP                        1
+/*-------------------------- LWIP_PTP Configuration --------------------------*/
 
 #if LWIP_PTP
     /* PTP system time functions */
     #define LWIP_PTP_GET_TIME           ptp_get_time
     #define LWIP_PTP_SET_TIME           ptp_set_time
-    #define LWIP_PTP_UPDATE_COARSE      ptp_update_coarse
     #define LWIP_PTP_UPDATE_FINE        ptp_update_fine
 
     /* PTP stack timer functions */

@@ -23,13 +23,13 @@
 /* Task 1 */
 static void startTask1(void *args __attribute((unused)))
 {
-
     for (;;) {
+        // printf("Hello!\n");
         vTaskDelay(1000);
     }
 }
 
-/* Task 3 - Blink Warning LED */
+/* Task 3 */
 static void startTask3(void *args __attribute((unused)))
 {
 
@@ -39,6 +39,8 @@ static void startTask3(void *args __attribute((unused)))
     char msg[] = "alpha";
     struct netbuf *buf;
     char * data;
+
+    printf("TEST\n");
 
     conn = netconn_new(NETCONN_UDP);
     netconn_bind(conn, IP_ADDR_ANY, 80); //local port
@@ -51,7 +53,7 @@ static void startTask3(void *args __attribute((unused)))
         memcpy(data, msg, sizeof(msg));
         netconn_send(conn, buf);
         netbuf_delete(buf); // De-allocate packet buffer
-        vTaskDelay(10000);
+        vTaskDelay(1000);
     }
 }
 
@@ -61,8 +63,11 @@ static void startTask3(void *args __attribute((unused)))
 int main(void)
 {
 
+    /* Hardware Initialisation */
     portClockInit();  // Configure RCC, System Clock Tree, PLL, etc...
+    portSerialInitialise();
 
+    /* Base tasks */
     xTaskCreate(startTask1, "task1", 350, NULL, 5, NULL);
     xTaskCreate(startTask3, "task3", 1024, NULL, FREERTOS_PRIORITIES-3, NULL);
 
