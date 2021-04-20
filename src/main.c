@@ -24,7 +24,7 @@
 static void startTask1(void *args __attribute((unused)))
 {
     for (;;) {
-        // printf("Hello!\n");
+        printf("Hello World!\n");
         vTaskDelay(1000);
     }
 }

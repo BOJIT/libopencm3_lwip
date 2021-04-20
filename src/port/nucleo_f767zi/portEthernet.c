@@ -460,18 +460,18 @@ static void process_tx_descr(struct pbuf *p, int first, int last)
  * @param netif network interface struct
 */
 /// @todo add return type!
-static int process_rx_descr(struct netif *netif)
+static err_t process_rx_descr(struct netif *netif)
 {
     /* Descriptor 'sanity checks' */
     if(rx_cur_dma_desc->Status & ETH_RDES0_OWN)
-        return 1;   // Descriptor is still owned by the DMA controller
+        return ERR_WOULDBLOCK;   // Descriptor is still owned by the DMA controller
 
     if(rx_cur_dma_desc->pbuf == NULL)
-        return 1;   // No pbuf was allocated to this descriptor!
+        return ERR_VAL;   // No pbuf was allocated to this descriptor!
 
     if(!((ETH_RDES0_LS | ETH_RDES0_FS) ==
                 (rx_cur_dma_desc->Status & (ETH_RDES0_LS | ETH_RDES0_FS))))
-        return 1;   // In store and forward mode this should never trigger
+        return ERR_IF;   // In store and forward mode this should never trigger
 
 
     int frame_length = (rx_cur_dma_desc->Status & ETH_RDES0_FL)
@@ -498,7 +498,7 @@ static int process_rx_descr(struct netif *netif)
     /* Reallocate new pbuf to descriptor */
     rx_cur_dma_desc->pbuf = pbuf_alloc(PBUF_RAW, PBUF_POOL_BUFSIZE, PBUF_POOL);
     if (rx_cur_dma_desc->pbuf == NULL)
-        return 1;   // Pbuf allocation failed!
+        return ERR_MEM;   // Pbuf allocation failed!
 
     rx_cur_dma_desc->Buffer1Addr = rx_cur_dma_desc->pbuf->payload;
     rx_cur_dma_desc->Status = ETH_RDES0_OWN;   // Pass ownership back to DMA
@@ -510,7 +510,7 @@ static int process_rx_descr(struct netif *netif)
 
     rx_cur_dma_desc = rx_cur_dma_desc->Buffer2NextDescAddr; // Next descriptor
 
-    return 0;
+    return ERR_OK;
 }
 
 /*------------------------------- PHY Functions ------------------------------*/
@@ -564,6 +564,7 @@ static err_t phy_negotiate(void)
 */
 static void ethernetif_input(void* argument)
 {
+    err_t error;
     struct netif *netif = (struct netif *) argument;
 
     /* Block the task before running for the first time */
@@ -577,8 +578,8 @@ static void ethernetif_input(void* argument)
         configASSERT(eth_task == NULL);
         eth_task = xTaskGetCurrentTaskHandle();
 
-        if(process_rx_descr(netif)) {
-            LWIP_DEBUGF(NETIF_DEBUG, ("ethernetif_input: descriptor error!\n"));
+        if((error = process_rx_descr(netif)) != ERR_OK) {
+            LWIP_DEBUGF(NETIF_DEBUG, ("ethernetif_input: descriptor error %d\n", error));
         }
 
         /** @todo if this task and the ISR get out of sync (under heavy load),
